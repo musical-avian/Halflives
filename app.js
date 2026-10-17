@@ -1,7 +1,7 @@
 // DOM wiring only. Math: pk.js, state → lines: model.js, persistence: io.js.
 
 import { fromHash, fromJson, load, save, toHash, toJson } from "./io.js";
-import { buildLines, normalize } from "./model.js";
+import { buildLines, VIEWS } from "./model.js";
 import { defaults } from "./presets.js";
 import { marked } from "./vendor/marked.esm.js";
 
@@ -53,21 +53,31 @@ function renderChart() {
   const { rangeH, yMode, showMean, interactions } = state.view;
   const n = 1200;
   const times = Array.from({ length: n + 1 }, (_, i) => (i * rangeH) / n);
-  let lines = buildLines(state, times);
-  if (yMode === "normalized") lines = normalize(lines);
+  const { lines, missing } = buildLines(state, times);
   const series = [{ label: "time", value: (_, v) => (v == null ? "" : clock(v)) }];
   const data = [times];
+  const bands = [];
+  const helpers = []; // series indices of bands/means/averages, kept out of the legend
+  const aux = (cfg, values) => {
+    helpers.push(series.length);
+    series.push(cfg);
+    data.push(values);
+  };
   for (const l of lines) {
+    if (l.band) {
+      // band edges drawn invisibly, filled between by uPlot `bands`
+      aux({ label: `${l.label} (95th pct)`, stroke: "transparent", points: { show: false } }, l.band.hi);
+      aux({ label: `${l.label} (5th pct)`, stroke: "transparent", points: { show: false } }, l.band.lo);
+      bands.push({ series: [series.length - 2, series.length - 1], fill: `${l.color}2e` });
+    }
     series.push({ label: l.label, stroke: l.color, width: 2, dash: l.dash ?? undefined, value: (_, v) => (v == null ? "" : fmt(v)) });
     data.push(Array.from(l.values));
-    if (l.avg) {
-      series.push({ label: `${l.label} (τ-avg)`, stroke: l.color, width: 1, dash: [4, 4] });
-      data.push(l.avg);
-    }
-    if (showMean && l.cavg != null) {
-      series.push({ label: `${l.label} (mean)`, stroke: l.color, width: 1, dash: [1, 6] });
-      data.push(times.map(() => l.cavg));
-    }
+    if (l.avg) aux({ label: `${l.label} (τ-avg)`, stroke: l.color, width: 1, dash: [4, 4] }, l.avg);
+    if (showMean && l.cavg != null)
+      aux(
+        { label: `${l.label} (mean)`, stroke: l.color, width: 1, dash: [1, 6] },
+        times.map(() => l.cavg),
+      );
   }
   const el = $("#chart");
   plot?.destroy();
@@ -80,15 +90,19 @@ function renderChart() {
       scales: { x: { time: false }, y: { range: (_, _min, max) => [0, max > 0 ? max * 1.05 : 1] } },
       axes: [
         { ...axis, values: (_, ticks) => ticks.map(clock), space: 70 },
-        { ...axis, label: yMode === "normalized" ? "% of peak" : "amount in body (mg-eq)", values: (_, t) => t.map(fmt) },
+        { ...axis, label: VIEWS[yMode].label, values: (_, t) => t.map(fmt), size: 60 },
       ],
       series,
+      bands,
       legend: { live: true },
     },
     data,
     el,
   );
+  const rows = plot.root.querySelectorAll(".u-legend .u-series");
+  for (const i of helpers) rows[i]?.style.setProperty("display", "none");
   renderStats(lines, interactions);
+  $("#missing").textContent = missing.length ? `No data for this view: ${missing.join(", ")} (see Limits).` : "";
 }
 new ResizeObserver(() => plot?.setSize({ width: $("#chart").clientWidth, height: plot.height })).observe($("#plot"));
 
@@ -98,7 +112,7 @@ function renderStats(lines, mode) {
       "tr",
       {},
       h("td", {}, h("span", { className: "swatch", style: `background:${l.color}` }), l.label),
-      h("td", {}, fmt(l.stats.peak)),
+      h("td", {}, `${fmt(l.stats.peak)} ${l.unit}`),
       h("td", {}, clock(l.stats.peakAtH)),
       h("td", {}, fmt(l.stats.cavg)),
       h("td", {}, fmtH(l.stats.effThalfH)),
@@ -111,7 +125,7 @@ function renderStats(lines, mode) {
     h(
       "tr",
       {},
-      ["Line", "Peak (mg)", "at", "Mean", "Slowest t½", "Accum.", "≈ steady state", "Interaction notes"].map((x) => h("th", {}, x)),
+      ["Line", "Peak", "at", "Mean", "Slowest t½", "Accum.", "≈ steady state", "Interaction notes"].map((x) => h("th", {}, x)),
     ),
     ...rows,
   );
@@ -132,6 +146,28 @@ const numIn = (value, onSet, step = "any") =>
       }
     },
   });
+
+/** Number field for an optional nested value: path like "recirc.lagH"; empty or 0 removes it. */
+function optField(sub, label, path, title) {
+  const keys = path.split(".");
+  const get = () => keys.reduce((o, k) => o?.[k], sub);
+  const input = h("input", {
+    type: "number",
+    step: "any",
+    value: get() ?? "",
+    title,
+    style: "width:5.5em",
+    oninput: (e) => {
+      const v = e.target.value === "" ? null : Number(e.target.value);
+      if (v != null && !(v >= 0)) return;
+      let o = sub;
+      for (const k of keys.slice(0, -1)) o = o[k] ??= {};
+      o[keys.at(-1)] = v || undefined;
+      commit();
+    },
+  });
+  return field(label, input);
+}
 
 const phasesText = (phases) => phases.map((p) => `${p.f}@${p.thalfH}`).join("; ");
 const parsePhases = (text) => {
@@ -213,6 +249,17 @@ function pkEditor(sub) {
           },
         }),
       ),
+    ),
+    h(
+      "div",
+      { className: "row" },
+      optField(sub, "lag h", "tlagH", "absorption lag time"),
+      optField(sub, "transit n", "transit.n", "number of transit compartments (Savic 2007), max 6"),
+      optField(sub, "MTT h", "transit.mttH", "mean transit time"),
+      optField(sub, "recirc share", "recirc.fraction", "share of dose re-absorbed later (0–1)"),
+      optField(sub, "recirc after h", "recirc.lagH", "delay of the re-absorbed share"),
+      optField(sub, "effect t½eq h", "pd.ke0ThalfH", "effect-site equilibration half-life (Sheiner 1979)"),
+      optField(sub, `V for ${sub.conc?.unit ?? "ng/mL"} (L)`, "conc.vL", "scaling volume for concentration view"),
     ),
     sub.metabolites?.length
       ? h(
@@ -348,6 +395,21 @@ function card(reg, idx) {
         }),
       ),
     ),
+    sub.conc
+      ? h(
+          "label",
+          { className: "small", title: sub.conc.basis },
+          h("input", {
+            type: "checkbox",
+            checked: state.view.yMode === "conc",
+            onchange: (e) => {
+              state.view.yMode = e.target.checked ? "conc" : "normalized";
+              commit({ cards: true });
+            },
+          }),
+          `absolute (${sub.conc.unit}) ⓘ`,
+        )
+      : null,
     h(
       "details",
       {},
@@ -408,7 +470,7 @@ for (const el of document.querySelectorAll("[data-view]")) {
   el.addEventListener("change", () => {
     const k = el.dataset.view;
     state.view[k] = el.type === "checkbox" ? el.checked : k === "rangeH" ? Number(el.value) : el.value;
-    commit();
+    commit({ cards: k === "yMode" }); // cards show the "absolute" toggle
   });
 }
 

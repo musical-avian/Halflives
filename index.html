@@ -86,10 +86,15 @@
         </select>
       </label>
       <label>Y
-        <select data-view="yMode"><option value="normalized">% of own peak</option><option value="amount">amount (mg)</option></select>
+        <select data-view="yMode">
+          <option value="normalized">% of own peak</option><option value="amount">amount (mg)</option>
+          <option value="conc">concentration (ng/mL, pg/mL)</option><option value="effect">effect site (% of peak)</option>
+          <option value="occupancy">occupancy (%)</option>
+        </select>
       </label>
       <label><input type="checkbox" data-view="showMean" /> mean</label>
       <label><input type="checkbox" data-view="showAvg" /> rolling avg</label>
+      <label title="5–95% range of 30 simulated people"><input type="checkbox" data-view="showBand" /> variability</label>
       <label>Interactions
         <select data-view="interactions"><option value="off">off</option><option value="typical">typical</option><option value="worst">worst case</option></select>
       </label>
@@ -100,6 +105,7 @@
       <button type="button" data-doc="formulas">Formulas</button>
       <button type="button" data-doc="presets">Sources</button>
       <button type="button" data-doc="interactions">Interactions</button>
+      <button type="button" data-doc="limits">Limits</button>
       <input type="file" id="file" accept="application/json,.json" hidden />
     </div>
     <main>
@@ -119,6 +125,7 @@
       <section id="plot">
         <div id="chart"></div>
         <div class="scroll"><table id="stats"></table></div>
+        <p class="small" id="missing"></p>
         <p class="small" id="msg"></p>
       </section>
     </main>

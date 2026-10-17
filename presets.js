@@ -38,10 +38,26 @@ const S = {
   utrogestan: { title: "Micronised progesterone capsules SmPC §5.2 (eMC 352)", url: "https://www.medicines.org.uk/emc/product/352/smpc" },
   pollock1999: { title: "Pollock 1999, estrogen inhibits caffeine metabolism", url: "https://doi.org/10.1177/00912709922008560" },
   jusko1978: { title: "Jusko 1978, theophylline in marihuana/tobacco smokers", url: "https://pubmed.ncbi.nlm.nih.gov/688731/" },
+  zhang2019: {
+    title: "Zhang 2019, bupropion XL PK incl. metabolites (Cmax/AUC, lag time)",
+    url: "https://doi.org/10.1007/s13318-018-0537-z",
+  },
+  learned2003: { title: "Learned-Coughlin 2003, bupropion DAT occupancy (PET)", url: "https://doi.org/10.1016/s0006-3223(02)01834-6" },
+  strougo2008: { title: "Strougo 2008, THC PK-PD: effect equilibration half-lives", url: "https://doi.org/10.1177/0269881108089870" },
+  dronabinol: {
+    title: "Dronabinol (oral THC) US label 2005",
+    url: "https://www.accessdata.fda.gov/drugsatfda_docs/label/2005/018651s021lbl.pdf",
+  },
+  aaron2025: { title: "Aaron 2025, SC estradiol valerate/cypionate steady-state levels", url: "https://doi.org/10.1089/trgh.2024.0264" },
+  herndon2023: { title: "Herndon 2023, SC vs IM estradiol doses and levels", url: "https://doi.org/10.1016/j.eprac.2023.02.006" },
   jensen1985: { title: "Jensen 1985, smoking and serum estrogens on HRT", url: "https://doi.org/10.1056/NEJM198510173131602" },
 };
 
 const one = (thalfH) => [{ f: 1, thalfH }];
+
+// Estradiol concentration scale: patch 50 µg/day gives Cmax/Cmin 57/28 pg/mL at steady state (Estradot SmPC)
+// → mean ≈ 42.5 pg/mL; clearance = 2.083 µg/h ÷ 0.0425 µg/L = 49 L/h; scaling volume V = CL/ke (t½ 1 h) ≈ 70.7 L.
+const E2_CONC = { vL: 70.7, unit: "pg/mL", basis: "derived from patch steady state (Estradot SmPC)" };
 
 export const substances = [
   {
@@ -53,7 +69,8 @@ export const substances = [
     tmaxH: 1.5,
     phases: one(1.5),
     metabolites: [],
-    approx: "F <5% with large person-to-person variation; metabolites inactive (not plotted).",
+    variability: { F: 0.5, basis: "assumed: SmPC reports 'substantial' variability without numbers" },
+    approx: "F <5% with large person-to-person variation; metabolites inactive (not plotted). No validated concentration scale.",
     sources: [S.agoSmpc],
   },
   {
@@ -63,14 +80,25 @@ export const substances = [
     color: "#d9480f",
     F: 1,
     tmaxH: 5,
-    phases: one(21),
+    tlagH: 1.5,
+    phases: [
+      { f: 0.96, thalfH: 2.5 },
+      { f: 0.04, thalfH: 21 },
+    ],
+    conc: {
+      vL: 1203,
+      unit: "ng/mL",
+      basis: "fitted to Zhang 2019 day-1 Cmax 49.9 ng/mL and AUC0–24 498; checked vs steady-state 300 mg Cmax 111.9 (model 108.5)",
+    },
+    pd: { occupancy: { value: 0.26, driver: "Hydroxybupropion", ref: { dose: 300, intervalH: 24 }, label: "DAT occupancy" } },
     metabolites: [
       { name: "Hydroxybupropion", thalfH: 20, aucRatio: 13, active: true, on: true },
       { name: "Threohydrobupropion", thalfH: 37, aucRatio: 7, active: true, on: false },
       { name: "Erythrohydrobupropion", thalfH: 33, aucRatio: 1.4, active: true, on: false },
     ],
-    approx: "Absolute F unknown (no IV form) → relative scale. Metabolite levels scaled to the label's exposure ratios.",
-    sources: [S.bupLabel, S.bupSmpc],
+    approx:
+      "Absolute F unknown (no IV form): shape, lag (1.5 h) and fast phase (96% @ 2.5 h) fitted to measured plasma levels, so ng/mL mode is calibrated. Metabolites scaled to the label's exposure ratios. Occupancy driver (hydroxybupropion) is an assumption.",
+    sources: [S.bupLabel, S.bupSmpc, S.zhang2019, S.learned2003],
   },
   {
     id: "thc-vape",
@@ -87,9 +115,11 @@ export const substances = [
       { name: "11-OH-THC", thalfH: 2, aucRatio: 0.1, active: true, on: true },
       { name: "THC-COOH", thalfH: 72, aucRatio: 5, active: false, on: false },
     ],
+    pd: { ke0ThalfH: 1, basis: "CNS effects equilibrate with t½ 39–85 min (Strougo 2008); 1 h used" },
+    variability: { F: 1.0, basis: "inhaled F 2–56% (Huestis 2007) read as 5–95% range" },
     approx:
       "Inhaled F varies widely (smoked 2–56%); vaporizing gave 1.4–2× smoked peaks in one study, comparable in another. Fast/slow split fitted by eye (blood THC near zero within ~4 h). Metabolite ratios estimated from described curves.",
-    sources: [S.huestis2007, S.huestis1992, S.spindle2018, S.newmeyer2016],
+    sources: [S.huestis2007, S.huestis1992, S.spindle2018, S.newmeyer2016, S.strougo2008],
   },
   {
     id: "thc-oral",
@@ -106,8 +136,12 @@ export const substances = [
       { name: "11-OH-THC", thalfH: 2, aucRatio: 1, active: true, on: true },
       { name: "THC-COOH", thalfH: 72, aucRatio: 10, active: false, on: false },
     ],
-    approx: "Oral F 4–12%. 11-OH-THC is much higher after oral than inhaled use (first pass); ratios estimated.",
-    sources: [S.huestis2007, S.newmeyer2016],
+    tlagH: 0.5,
+    pd: { ke0ThalfH: 1, basis: "CNS effects equilibrate with t½ 39–85 min (Strougo 2008, inhaled data); 1 h used" },
+    variability: { F: 0.33, basis: "oral F 4–12% (Huestis 2007) read as 5–95% range" },
+    approx:
+      "Oral F 4–12% (label: 10–20%). Lag 0.5 h from label onset 0.5–1 h. 11-OH-THC is much higher after oral than inhaled use (first pass); ratios estimated.",
+    sources: [S.huestis2007, S.newmeyer2016, S.dronabinol, S.strougo2008],
   },
   {
     id: "cbd-vape",
@@ -121,6 +155,7 @@ export const substances = [
       { f: 0.01, thalfH: 60 },
     ],
     metabolites: [{ name: "7-OH-CBD", thalfH: 2, aucRatio: 0.4, active: true, on: false }],
+    variability: { F: 0.4, basis: "smoked F 31 ± 13% (Ohlsson 1986)" },
     approx:
       "F measured for smoked CBD (31 ± 13%), assumed similar when vaporized. Fast/slow split chosen so steady state is reached in 2–4 days as the SmPC states.",
     sources: [S.ohlsson1986, S.millar2018, S.cbdSmpc],
@@ -137,6 +172,7 @@ export const substances = [
       { f: 0.01, thalfH: 60 },
     ],
     metabolites: [{ name: "7-OH-CBD", thalfH: 2, aucRatio: 0.4, active: true, on: true }],
+    variability: { F: 0.5, basis: "derived: food changes exposure 3–5× (SmPC)" },
     approx: "No measured oral F in humans (Millar 2018); 6% is an assumption. Food raises exposure 3–5×.",
     sources: [S.cbdSmpc, S.millar2018],
   },
@@ -166,7 +202,9 @@ export const substances = [
       { name: "Theobromine", thalfH: 7.2, fm: 0.11, active: true, on: false },
       { name: "Theophylline", thalfH: 6.2, fm: 0.04, active: true, on: false },
     ],
-    approx: "t½ ranges 1.5–9.5 h between people (smoking shortens, estrogens lengthen).",
+    conc: { vL: 49, unit: "ng/mL", basis: "Vss 0.63–0.72 L/kg (Lelo 1986) × 70 kg (body weight assumed)" },
+    variability: { thalf: 0.56, basis: "t½ 1.5–9.5 h (IOM 2001) read as 5–95% range" },
+    approx: "t½ ranges 1.5–9.5 h between people (smoking shortens, estrogens lengthen). ng/mL assumes 70 kg.",
     sources: [S.iom, S.blanchard1983, S.lelo1986a, S.lelo1986b],
   },
   {
@@ -177,9 +215,13 @@ export const substances = [
     F: 0.04,
     tmaxH: 2,
     phases: one(14),
+    recirc: { fraction: 0.3, lagH: 5 },
+    // same clearance as the other routes (49 L/h) but apparent t½ 14 h → V = 49 / (ln2/14) ≈ 990 L
+    conc: { vL: 990, unit: "pg/mL", basis: "derived: patch-based clearance with the oral apparent t½; not checked against oral data" },
+    variability: { F: 1.45, basis: "oral F 0.1–12% read as 5–95% range" },
     metabolites: [{ name: "Estrone", thalfH: 14, aucRatio: 6, active: true, on: true }],
     approx:
-      "Apparent t½ 13–20 h comes from the estrone/estrone-sulfate reservoir (true E2 t½ ≈ 1 h). Estrone ≈ 6× estradiol after oral dosing (Moreau 2025 medians).",
+      "Second peak 6–8 h after dosing (SmPC) modelled as 30% of the dose re-absorbed 5 h later — the 30% is an assumption. Apparent t½ 13–20 h comes from the estrone/estrone-sulfate reservoir (true E2 t½ ≈ 1 h). Estrone ≈ 6× estradiol after oral dosing (Moreau 2025 medians).",
     sources: [S.progynova, S.kuhl2005, S.moreau2025],
   },
   {
@@ -190,9 +232,10 @@ export const substances = [
     F: 1,
     absStepsH: [32, 34, 36],
     phases: one(1),
+    conc: E2_CONC,
     metabolites: [],
     approx: "Depot fitted by eye to IM data (peak ≈ 4 d, elevated ≈ 11 d); SC shown equivalent to IM for this ester in an RCT.",
-    sources: [S.oriowo1980, S.sierra2011, S.estradot],
+    sources: [S.oriowo1980, S.sierra2011, S.estradot, S.aaron2025, S.herndon2023],
   },
   {
     id: "ev-im",
@@ -202,6 +245,7 @@ export const substances = [
     F: 1,
     absStepsH: [29, 38],
     phases: one(1),
+    conc: E2_CONC,
     metabolites: [],
     approx: "Depot fitted by eye (peak ≈ 2 d, elevated 7–8 d). No time-resolved SC data found → IM only.",
     sources: [S.oriowo1980, S.estradot],
@@ -214,6 +258,7 @@ export const substances = [
     F: 1,
     releaseH: 84,
     phases: one(1),
+    conc: E2_CONC,
     metabolites: [],
     unit: "mg/patch",
     approx: "Modelled as constant release over 3.5 days; real patches give Cmax/Cmin ≈ 57/28 pg/mL at steady state.",
@@ -227,6 +272,7 @@ export const substances = [
     F: 0.1,
     absStepsH: [16],
     phases: one(1),
+    conc: E2_CONC,
     metabolites: [],
     approx: "≈10% absorbed; skin-depot t½ chosen to match steady state in 3–5 days and baseline ~76 h after stopping.",
     sources: [S.oestrogel],
@@ -340,6 +386,6 @@ export const interactions = [
   },
 ];
 
-export const view = { rangeH: 96, yMode: "normalized", showMean: true, showAvg: false, interactions: "off" };
+export const view = { rangeH: 96, yMode: "normalized", showMean: true, showAvg: false, showBand: false, interactions: "off" };
 
 export const defaults = () => structuredClone({ version: 1, substances, regimens, interactions, view });

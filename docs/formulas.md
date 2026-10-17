@@ -41,6 +41,7 @@ G(t) = Σ fᵢ · e^(−keᵢ·t),     Σ fᵢ = 1
 | Route | Input into the body | Amount in body |
 |---|---|---|
 | Oral, gel, inhaled (first-order) | `ka·e^(−ka·t)` | `A = F·D · (ka·e^(−ka·t)) ⊛ G` |
+| Transit chain (Savic 2007) + oral | `transit ⊛ ka·e^(−ka·t)` | `A = F·D · transit ⊛ (ka·e^(−ka·t)) ⊛ G` |
 | Depot injection (2–3 steps) | `(k₁e^(−k₁t)) ⊛ (k₂e^(−k₂t)) ⊛ …` | `A = F·D · steps ⊛ G` |
 | Patch (zero-order release R = D/T over wear time T) | constant R | `A = F·R · Σ cᵢ/kᵢ · (e^(−kᵢ·max(0, t−T)) − e^(−kᵢ·t))` |
 
@@ -104,12 +105,67 @@ Static factors per perpetrator → victim pair (sources in *Interactions*):
 
 Limitation: real inhibition follows the perpetrator's level hour by hour, and induction ramps up over 1–2 weeks. Modelling that needs inhibition constants (Ki), volumes and induction rates that the literature doesn't give reliably for these drugs, so it is not done.
 
-## 8. Why no ODE solver
+## 8. Why no ODE solver — and what the "independent numerical solver" is
 
-All models above are linear first-order, so they have exact closed-form solutions. A numerical ODE solver would compute the same curves with step-size error, more code and more CPU. ODEs only pay off for nonlinear or time-varying effects (saturable metabolism, concentration-dependent interactions, enzyme induction), which need parameters we don't have (see §7).
+All models here are linear first-order, so they have exact closed-form solutions. A numerical ODE solver would compute the same curves with step-size error, more code and more CPU. ODEs only pay off for nonlinear or time-varying effects (saturable metabolism, concentration-dependent interactions, enzyme induction), which need parameters we don't have (see §7 and *Limits*).
 
-An ODE solver **is** used in the tests: an independent RK4 integration of the same compartment model checks every closed form (oral, 2-phase, metabolites, depot, patch, repeat + skip, steady state) to 10⁻⁶ of peak, plus 300 random parameter sets for the AUC and Tmax identities.
+**The independent solver lives only in the tests** (`test/pk.test.js`). It is a classic **4th-order Runge–Kutta (RK4)** integrator: it writes the model as plain rate equations — "gut loses ka·gut per hour, body gains it", "body loses ke·body", "metabolite gains r·parent, loses k_m·metabolite", "effect site moves towards plasma at ke0" — and steps all amounts forward in 0.002-hour steps. It never uses any of the formulas on this page, so if the closed forms were wrong, the two would disagree. They agree to 10⁻⁶ of peak for: oral (1 and 2 phases), metabolites, depot, transit chain, patch, lag time, recirculation, effect compartment, repeat + skipped doses and steady state. On top, 300 random parameter sets check the AUC and Tmax identities.
 
 ## 9. What "amount" means
 
 Y axis "amount (mg-eq)" = drug in the body after bioavailability, not a blood concentration (that would need the volume of distribution, which varies a lot between people). "% of own peak" makes drugs with very different doses comparable.
+
+## 10. Lag time
+
+`A_lag(t) = A(t − t_lag)` (zero before). Tmax entered by the user includes the lag; ka is solved for `Tmax − t_lag`.
+Sources: Rowland & Tozer ch. 6; Zhang 2019 found a lag improves the bupropion XL fit ([doi](https://doi.org/10.1007/s13318-018-0537-z)).
+
+## 11. Transit compartments
+
+A chain of n first-order steps with mean transit time MTT gives an S-shaped, delayed rise (Savic 2007, [doi](https://doi.org/10.1007/s10928-007-9066-0)). The exact form with equal rates (`ktr = n/MTT`, density `ktr^n·t^(n−1)·e^(−ktr·t)/(n−1)!`) is not an exponential sum, so the rates are spread ±20% around ktr while keeping `Σ 1/kᵢ = MTT` exactly. Measured difference to the exact form: **0.94% of peak** for n = 4 (test). n is capped at 6 to keep floating-point error negligible.
+
+## 12. Enterohepatic recirculation (second peak)
+
+A share `f` of the dose is absorbed again after `t_re`:
+
+```
+A(t) = (1 − f)·A₁(t − t_lag) + f·A₁(t − t_lag − t_re)
+```
+
+Total exposure is unchanged (shares sum to 1). Used for oral estradiol (SmPC: second maximum after 6–8 h); `f = 0.3` is an **assumption**.
+
+## 13. Effect compartment (pharmacodynamics)
+
+Effects often lag behind blood levels (hysteresis). Sheiner 1979 ([doi](https://doi.org/10.1002/cpt1979253358)) adds a virtual "effect site" that follows plasma with rate `ke0`:
+
+```
+dCe/dt = ke0·(C − Ce)   ⇒   Ce = C ⊛ ke0·e^(−ke0·t)
+```
+
+Same area as plasma, later and flatter peak. `ke0 = ln 2 / t½eq`. THC: t½eq 39–85 min for CNS effects, 7.7 min for heart rate (Strougo 2008, [doi](https://doi.org/10.1177/0269881108089870)); 1 h used. View: *effect site (% of peak)*.
+
+## 14. Occupancy (Emax / Hill, n = 1)
+
+```
+occupancy = C / (C + EC50)
+EC50 = C_ref · (1 − occ_ref) / occ_ref
+```
+
+Hill n = 1 is single-site binding (mass action). EC50 is calibrated so a measured reference gives the measured value: bupropion **26% dopamine-transporter occupancy** at steady state on 300 mg/day (Learned-Coughlin 2003, [doi](https://doi.org/10.1016/s0006-3223(02)01834-6)), level = mean steady-state hydroxybupropion. Choosing hydroxybupropion as the driver is an **assumption** (the measured occupancy stayed flat 3–24 h, like the long-lived metabolite). Units cancel, so this works on the relative scale too.
+
+## 15. Concentration (ng/mL, pg/mL)
+
+`C = amount / V`. V is an **apparent scaling volume** chosen so the model reproduces measured exposure; it is not a physiological volume.
+
+| Substance | V | How |
+|---|---|---|
+| Bupropion XL | 1203 L | fitted with the 2-phase shape and 1.5 h lag to Zhang 2019 day-1 Cmax 49.9 ng/mL and AUC₀₋₂₄ 498 h·ng/mL; total AUC from steady-state AUCτ 1166 (linear kinetics: AUCτ,ss = AUC∞,single). **Independent check:** steady-state 300 mg Cmax model 108.5 vs measured 111.9 ng/mL (−3%). |
+| Estradiol (non-oral) | 70.7 L | patch 50 µg/day → mean ≈ 42.5 pg/mL ⇒ CL ≈ 49 L/h; V = CL/ke with t½ 1 h |
+| Estradiol (oral) | 990 L | same CL, apparent t½ 14 h (not checked against oral data) |
+| Caffeine | 49 L | Vss 0.7 L/kg (Lelo 1986) × 70 kg (assumed weight) |
+
+Model vs measured for checks that were **not** used to fit: see *Limits*.
+
+## 16. Variability band (5–95%)
+
+30 simulated people (seeded, so the band is stable). Each gets `F·e^(σ_F·z₁)` (capped at 1), all half-lives `× e^(σ_t·z₂)`, Tmax `× e^(σ_m·z₃)`, z ~ N(0,1). In % views the band is relative to the typical person's peak, so it can exceed 100%. σ comes from a published range read as the 5–95% range, `σ = ln(max/min)/3.29`, where one exists (caffeine t½, THC and CBD F, oral estradiol F); otherwise **σ = 0.3 is assumed** (≈ 30% CV, a common order of magnitude, not a measurement). Shown as a shaded band.

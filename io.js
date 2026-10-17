@@ -1,6 +1,6 @@
 // Validation, JSON import/export, share links, local persistence. No DOM.
 
-const KEY = "halflives.v1";
+const KEY = "halflives.v2"; // bump when presets change shape, so stale saved states are not reused
 const num = (x, min = 0) => typeof x === "number" && Number.isFinite(x) && x >= min;
 
 /** Throws a readable Error if `s` is not a usable state; returns it otherwise. */

@@ -44,25 +44,38 @@ export const disposition = (phases) => phases.map((p) => ({ c: p.f, k: rate(p.th
 
 const step = (k) => [{ c: k, k }];
 
-/** First-order absorption rate ka that puts the peak of (ka·e^(−ka·t)) ⊛ G at tmax (bisection, log scale). */
-export function solveKa(tmaxH, G) {
+/** First-order absorption rate ka that puts the peak of pre ⊛ (ka·e^(−ka·t)) ⊛ G at tmax (bisection, log scale). */
+export function solveKa(tmaxH, G, pre = null) {
   let lo = Math.log(1e-4);
   let hi = Math.log(1e4);
   for (let i = 0; i < 200; i++) {
     const mid = (lo + hi) / 2;
-    const ka = Math.exp(mid);
+    const input = pre ? convolve(pre, step(Math.exp(mid))) : step(Math.exp(mid));
     // Still rising at tmax → peak comes later → absorption must be faster.
-    if (slope(convolve(step(ka), G), tmaxH) > 0) lo = mid;
+    if (slope(convolve(input, G), tmaxH) > 0) lo = mid;
     else hi = mid;
   }
   return Math.exp((lo + hi) / 2);
 }
 
-/** Input density of the absorption route, or null for zero-order release (patch). */
+/**
+ * Transit chain (Savic 2007): n steps with mean transit time MTT. Rates are spread ±20% around n/MTT
+ * (keeping Σ 1/kᵢ = MTT) because the exact equal-rate form t^n·e^(−kt) is not an exponential sum.
+ */
+export function transitSteps({ n: nIn, mttH }) {
+  const n = Math.min(6, Math.max(1, Math.round(nIn)));
+  const f = Array.from({ length: n }, (_, i) => (n > 1 ? 0.8 + (0.4 * i) / (n - 1) : 1));
+  const S = f.reduce((a, x) => a + 1 / x, 0);
+  return f.map((x) => step((x * S) / mttH));
+}
+
+/** Input density of the absorption route (transit chain, then depot steps or Tmax-solved ka), or null for a patch. */
 export function absorption(sub, G) {
-  if (sub.absStepsH?.length) return sub.absStepsH.map((h) => step(rate(h))).reduce(convolve);
-  if (sub.tmaxH != null) return step(solveKa(sub.tmaxH, G));
-  return null;
+  const pre = sub.transit?.n && sub.transit?.mttH ? transitSteps(sub.transit).reduce(convolve) : null;
+  const chain = (steps) => [pre, ...steps].filter(Boolean).reduce(convolve);
+  if (sub.absStepsH?.length) return chain(sub.absStepsH.map((h) => step(rate(h))));
+  if (sub.tmaxH != null) return chain([step(solveKa(Math.max(1e-3, sub.tmaxH - (sub.tlagH ?? 0)), G, pre))]);
+  return pre;
 }
 
 /** Metabolite impulse response: r·(G ⊛ e^(−km·t)). r from fraction formed (fm) or reported exposure ratio. */
@@ -81,7 +94,8 @@ export const withFactors = (sub, { ke = 1, f = 1 } = {}) => ({
 
 /**
  * Per-mg responses of one substance: parent first, then metabolites.
- * Each unit = { name, terms, boxH, auc }: amount in body after 1 mg dosed at t = 0.
+ * Each unit = { name, terms, boxH, auc, parts }: amount in body after 1 mg dosed at t = 0.
+ * parts = [{w, lagH}]: lag time, and enterohepatic recirculation as a delayed share of the dose.
  */
 export function units(sub) {
   const G = disposition(sub.phases);
@@ -90,17 +104,29 @@ export function units(sub) {
     { name: sub.name, ir: G, metabolite: null },
     ...(sub.metabolites ?? []).map((m) => ({ name: m.name, ir: metaboliteResponse(G, m), metabolite: m })),
   ];
+  const lag = sub.tlagH ?? 0;
+  const re = sub.recirc;
+  const parts = re?.fraction
+    ? [
+        { w: 1 - re.fraction, lagH: lag },
+        { w: re.fraction, lagH: lag + re.lagH },
+      ]
+    : [{ w: 1, lagH: lag }];
   return outputs.map(({ name, ir, metabolite }) => ({
     name,
     metabolite,
+    parts,
     boxH: abs ? 0 : sub.releaseH,
     terms: scale(abs ? convolve(abs, ir) : ir, sub.F),
     auc: sub.F * area(ir),
   }));
 }
 
-/** Amount at time t after 1 mg dosed at 0. Zero-order release over boxH: (1/T)·Σ c/k·(e^(−k·max(0,t−T)) − e^(−kt)). */
-export function unitAt(u, t) {
+/** Amount at time t after 1 mg dosed at 0, summed over the lagged parts. */
+export const unitAt = (u, t) => (u.parts ?? [{ w: 1, lagH: 0 }]).reduce((s, p) => s + p.w * shapeAt(u, t - p.lagH), 0);
+
+/** Zero-order release over boxH: (1/T)·Σ c/k·(e^(−k·max(0,t−T)) − e^(−kt)). */
+function shapeAt(u, t) {
   if (t < 0) return 0;
   if (!u.boxH) return at(u.terms, t);
   const T = u.boxH;
@@ -108,6 +134,15 @@ export function unitAt(u, t) {
   for (const { c, k } of u.terms) s += (c / k) * (Math.exp(-k * Math.max(0, t - T)) - Math.exp(-k * t));
   return s / T;
 }
+
+/** Effect-site curve (Sheiner 1979): Ce = A ⊛ ke0·e^(−ke0·t). Same area, delayed and smoothed. */
+export const effectSite = (u, ke0) => ({ ...u, terms: convolve(u.terms, step(ke0)) });
+
+/** Single-site binding (Hill n = 1): occupancy = C/(C + EC50). */
+export const occupancy = (c, ec50) => c / (c + ec50);
+
+/** EC50 that makes level `cRef` give occupancy `occ`. */
+export const ec50For = (occ, cRef) => (cRef * (1 - occ)) / occ;
 
 export const slowest = (u) => Math.min(...u.terms.map((x) => x.k));
 

@@ -3,9 +3,18 @@
 The app is plain static files, so any web server works. The `Containerfile` wraps them in rootless-friendly nginx.
 
 ```sh
+make start      # build image + run in background → http://localhost:8080
+make stop       # stop it
+make restart    # rebuild + restart
+make dev        # serve the working tree live (no rebuild)
+make help       # all targets; PORT=9000 make start for another port
+```
+
+Without make:
+
+```sh
 podman build -t halflives .
 podman run --rm -p 8080:8080 halflives
-# open http://localhost:8080
 ```
 
 Live-edit without rebuilding (mount the repo read-only; `:Z` relabels for SELinux):

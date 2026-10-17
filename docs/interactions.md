@@ -4,7 +4,7 @@ Optional overlay (toolbar → *Interactions*). When a perpetrator is shown on th
 
 - **Typical**: usual effect size.
 - **Worst case**: all active perpetrators at peak effect *at the same time*, each at its largest sourced effect, multiplied together. An upper bound, not a prediction. Inducers are left out (they lower levels).
-- Static model: the effect is assumed constant while the perpetrator is present. Formulas: *Formulas* §7.
+- Static model: the effect is assumed constant while the perpetrator is present. Formulas: *Formulas* §7. Time-dependent enzyme changes (induction building up over days, fading after stopping) are not modelled — see *Limits → Revisit later* for the data situation.
 
 | Perpetrator → victim | Mechanism | Typical / worst | Evidence | Source |
 |---|---|---|---|---|

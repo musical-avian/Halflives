@@ -7,20 +7,26 @@ import {
   curve,
   disposition,
   doseTimes,
+  ec50For,
+  effectSite,
+  occupancy,
   rate,
   rollingAverage,
   slowest,
   solveKa,
   stats,
+  transitSteps,
   unitAt,
   units,
   withFactors,
 } from "../pk.js";
 
-// ---- RK4 oracle: gut/depot chain → phase compartments (mixture) → metabolites ----
-// state = [depot_1..depot_n, central_1..central_p, metabolite_1..metabolite_m]
-function ode(sub, ka, doses, dose, tEnd, dt = 0.002) {
-  const steps = sub.absStepsH?.map(rate) ?? (ka ? [ka] : []);
+// ---- RK4 oracle: transit/gut/depot chain → phase compartments (mixture) → metabolites (+ effect site) ----
+// It only integrates the rate equations step by step; it never uses the closed forms it checks.
+// state = [absorption_1..absorption_n, central_1..central_p, metabolite_1..metabolite_m, effectSite?]
+function ode(sub, ka, events, dose, tEnd, { dt = 0.002, ke0 = null } = {}) {
+  const pre = sub.transit?.n ? transitSteps(sub.transit).map(([x]) => x.k) : [];
+  const steps = [...pre, ...(sub.absStepsH?.map(rate) ?? (ka ? [ka] : []))];
   const ks = sub.phases.map((p) => rate(p.thalfH));
   const fs = sub.phases.map((p) => p.f);
   const G = disposition(sub.phases);
@@ -30,6 +36,7 @@ function ode(sub, ka, doses, dose, tEnd, dt = 0.002) {
   });
   const nA = steps.length;
   const nP = ks.length;
+  const nM = mets.length;
   const T = sub.releaseH;
   // `t` = start of the current RK4 step: patch on/off switches only on grid points, so input is constant per step
   const deriv = (y, t) => {
@@ -40,25 +47,26 @@ function ode(sub, ka, doses, dose, tEnd, dt = 0.002) {
     }
     // input rate into the body: last absorption step, or zero-order patch release
     let input = nA ? steps[nA - 1] * y[nA - 1] : 0;
-    if (!nA && T) for (const td of doses) if (t >= td && t < td + T) input += (sub.F * dose) / T;
+    if (!nA && T) for (const e of events) if (t >= e.t && t < e.t + T) input += (e.w * sub.F * dose) / T;
     let P = 0;
     for (let j = 0; j < nP; j++) P += y[nA + j];
     for (let j = 0; j < nP; j++) d[nA + j] += fs[j] * input - ks[j] * y[nA + j];
     mets.forEach((m, j) => {
       d[nA + nP + j] += m.r * P - m.km * y[nA + nP + j];
     });
+    if (ke0) d[nA + nP + nM] = ke0 * (P - y[nA + nP + nM]); // Sheiner effect compartment
     return d;
   };
-  let y = new Array(nA + nP + mets.length).fill(0);
+  let y = new Array(nA + nP + nM + (ke0 ? 1 : 0)).fill(0);
   const out = [];
-  const pending = [...doses].sort((a, b) => a - b);
+  const pending = [...events].sort((a, b) => a.t - b.t);
   const n = Math.round(tEnd / dt);
   for (let s = 0; s <= n; s++) {
     const t = s * dt;
-    while (pending.length && pending[0] <= t + dt / 2) {
-      pending.shift();
-      if (nA) y[0] += sub.F * dose;
-      else if (!T) for (let j = 0; j < nP; j++) y[nA + j] += fs[j] * sub.F * dose;
+    while (pending.length && pending[0].t <= t + dt / 2) {
+      const { w } = pending.shift();
+      if (nA) y[0] += w * sub.F * dose;
+      else if (!T) for (let j = 0; j < nP; j++) y[nA + j] += w * fs[j] * sub.F * dose;
     }
     let P = 0;
     for (let j = 0; j < nP; j++) P += y[nA + j];
@@ -83,11 +91,26 @@ function ode(sub, ka, doses, dose, tEnd, dt = 0.002) {
 
 const close = (a, b, tol, msg) => assert.ok(Math.abs(a - b) <= tol, `${msg}: ${a} vs ${b} (tol ${tol})`);
 
-function compare(sub, doses, dose, tEnd, tol = 1e-6) {
-  const us = units(sub);
-  const ka = sub.tmaxH != null && !sub.absStepsH ? solveKa(sub.tmaxH, disposition(sub.phases)) : null;
-  // Patch: release window must align with ODE grid; dt chosen so doses land on grid points.
-  const ref = ode(sub, ka, doses, dose, tEnd);
+/** Dose events for the oracle, built independently from the substance's lag/recirculation settings. */
+const eventsFor = (sub, doses) =>
+  doses.flatMap((t) => {
+    const lag = sub.tlagH ?? 0;
+    const f = sub.recirc?.fraction ?? 0;
+    return f
+      ? [
+          { t: t + lag, w: 1 - f },
+          { t: t + lag + sub.recirc.lagH, w: f },
+        ]
+      : [{ t: t + lag, w: 1 }];
+  });
+
+function compare(sub, doses, dose, tEnd, tol = 1e-6, ke0 = null) {
+  let us = units(sub);
+  const G = disposition(sub.phases);
+  const pre = sub.transit?.n ? transitSteps(sub.transit).reduce(convolve) : null;
+  const ka = sub.tmaxH != null && !sub.absStepsH ? solveKa(sub.tmaxH - (sub.tlagH ?? 0), G, pre) : null;
+  const ref = ode(sub, ka, eventsFor(sub, doses), dose, tEnd, { ke0 });
+  if (ke0) us = [...us, effectSite(us[0], ke0)];
   // sample on the ODE grid (dt = 0.002 h) so no time-rounding error enters the comparison
   const ts = Array.from({ length: 38 }, (_, i) => Math.round((0.25 + (i * (tEnd - 0.25)) / 37) * 500) / 500);
   us.forEach((u, idx) => {
@@ -95,7 +118,12 @@ function compare(sub, doses, dose, tEnd, tol = 1e-6) {
     const peak = Math.max(...exact);
     assert.ok(peak > 0, `${u.name} has a curve`);
     ts.forEach((t, i) => {
-      close(exact[i], ref.at(t, idx), tol * peak, `${sub.name}/${u.name} t=${t.toFixed(2)}`);
+      close(
+        exact[i],
+        ref.at(t, idx),
+        tol * peak,
+        `${sub.name}/${u.name}${idx >= units(sub).length ? " (effect site)" : ""} t=${t.toFixed(2)}`,
+      );
     });
   });
 }
@@ -211,7 +239,7 @@ test("steady state: history sum == closed form 1/(1−e^(−kτ)) and matches lo
   }
   // ODE: 40 daily doses (~46 half-lives of history), compare the last day with SS.
   const long = Array.from({ length: 40 }, (_, i) => i * 24);
-  const ref = ode(sub, ka, long, 150, 40 * 24, 0.005);
+  const ref = ode(sub, ka, eventsFor(sub, long), 150, 40 * 24, { dt: 0.005 });
   for (const s of [1, 5, 12]) close(curve(u, doses, 150, [s])[0], ref.at(39 * 24 + s), 1e-5 * 150, `ode s=${s}`);
 });
 
@@ -272,4 +300,71 @@ test("property check: 300 random parameter sets keep AUC and peak identities", (
     const sl = (t) => u.terms.reduce((s, { c, k }) => s - k * c * Math.exp(-k * t), 0);
     assert.ok(sl(tmax * 0.98) > 0 && sl(tmax * 1.02) < 0, `peak at tmax #${i}`);
   }
+});
+
+test("lag time and enterohepatic recirculation: ODE oracle", () => {
+  compare({ ...oral1, name: "lag", tlagH: 1.5 }, [0, 24], 100, 60);
+  compare({ ...oral1, name: "recirc", tlagH: 0.5, recirc: { fraction: 0.3, lagH: 5 } }, [0, 24], 100, 60);
+  // the lagged peak still sits at the user's Tmax
+  const [u] = units({ ...oral1, tlagH: 1.5 });
+  const ts = Array.from({ length: 4001 }, (_, i) => i * 0.001);
+  const v = curve(u, [0], 1, ts);
+  close(ts[v.indexOf(Math.max(...v))], 2, 0.002, "peak at Tmax incl. lag");
+});
+
+test("transit compartments: ODE oracle, Σ 1/k = MTT, close to the exact Erlang (Savic) form", () => {
+  const sub = { name: "transit", F: 1, tmaxH: 4, transit: { n: 4, mttH: 2 }, phases: [{ f: 1, thalfH: 8 }] };
+  compare(sub, [0], 100, 48);
+  close(
+    transitSteps(sub.transit).reduce((a, [x]) => a + 1 / x.k, 0),
+    2,
+    1e-12,
+    "mean transit time",
+  );
+  // exact Erlang input: ktr = n/MTT, density ktr^n t^(n−1) e^(−ktr t)/(n−1)!; compare input densities
+  const n = 4;
+  const ktr = n / 2;
+  const chain = transitSteps(sub.transit).reduce(convolve);
+  let worst = 0;
+  let peak = 0;
+  for (let t = 0; t <= 10; t += 0.01) {
+    const erl = (ktr ** n * t ** (n - 1) * Math.exp(-ktr * t)) / 6;
+    const ours = chain.reduce((s, { c, k }) => s + c * Math.exp(-k * t), 0);
+    worst = Math.max(worst, Math.abs(erl - ours));
+    peak = Math.max(peak, erl);
+  }
+  assert.ok(worst / peak < 0.05, `transit vs Erlang max deviation ${((100 * worst) / peak).toFixed(2)}% of peak`);
+});
+
+test("effect compartment (Sheiner): ODE oracle, same area, later peak", () => {
+  compare({ ...oral2, name: "effect" }, [0], 10, 24, 1e-6, rate(1));
+  const [u] = units(oral2);
+  const e = effectSite(u, rate(1));
+  const ts = Array.from({ length: 2401 }, (_, i) => i * 0.01);
+  const vp = curve(u, [0], 1, ts);
+  const ve = curve(e, [0], 1, ts);
+  assert.ok(ts[ve.indexOf(Math.max(...ve))] > ts[vp.indexOf(Math.max(...vp))], "effect peaks later");
+  close(area(e.terms), area(u.terms), 1e-9, "area unchanged");
+});
+
+test("occupancy: EC50 calibrated from a reference regimen reproduces the measured value", () => {
+  const ec50 = ec50For(0.26, 3.7);
+  close(occupancy(3.7, ec50), 0.26, 1e-12, "26% at reference level");
+  assert.ok(occupancy(2 * 3.7, ec50) < 0.52, "saturates (Hill n = 1)");
+});
+
+test("bupropion calibration: fit targets (Zhang 2019 day 1) and independent steady-state check", async () => {
+  const { substances } = await import("../presets.js");
+  const sub = substances.find((x) => x.id === "bupropion-xl");
+  const [u] = units(sub);
+  const toNg = 1e3 / sub.conc.vL;
+  const ts = Array.from({ length: 481 }, (_, i) => i * 0.05);
+  const day1 = curve(u, [0], 150, ts).map((x) => x * toNg);
+  let auc = 0;
+  for (let i = 1; i < ts.length; i++) auc += ((day1[i] + day1[i - 1]) / 2) * 0.05;
+  close(Math.max(...day1), 49.9, 1.5, "day-1 Cmax ng/mL (fit target 49.9)");
+  close(auc, 498.2, 15, "day-1 AUC0–24 (fit target 498)");
+  const ss = curve(u, doseTimes({ startH: 0, intervalH: 24, steadyState: true }, 24, slowest(u)), 300, ts).map((x) => x * toNg);
+  // not fitted: model 108.5 vs measured 111.9 ng/mL
+  close(Math.max(...ss), 111.9, 0.1 * 111.9, "steady-state 300 mg Cmax within 10% of measured");
 });
